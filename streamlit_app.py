@@ -5,6 +5,7 @@ import numpy as np
 import plotly.express as px
 import PyPDF2
 import io
+import re
 
 st.set_page_config(
     page_title="Fundamental Stock Dashboard",
