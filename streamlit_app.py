@@ -99,6 +99,22 @@ def _normalize_name(name: str) -> str:
     return name
 
 
+def maybe_promote_first_row_to_header(df: pd.DataFrame) -> pd.DataFrame:
+    """If columns look like generic 0,1,2,... treat first row as header."""
+    if df is None or df.empty:
+        return df
+    # If all columns are numeric-like (0,1,2,...) it's probably from PDF helper with header=None
+    try:
+        col_strs = [str(c) for c in df.columns]
+        if all(re.fullmatch(r"\d+", c) for c in col_strs):
+            new_header = df.iloc[0].astype(str)
+            df = df[1:].copy()
+            df.columns = new_header
+    except Exception:
+        pass
+    return df
+
+
 def find_best_column(df: pd.DataFrame, candidates) -> str | None:
     """Find the first matching column in df among candidate names (using fuzzy matching)."""
     if df is None or df.empty:
@@ -128,6 +144,9 @@ def standardize_df(df: pd.DataFrame, section: str) -> pd.DataFrame | None:
     """
     if df is None:
         return None
+
+    # Try to fix case where columns are 0,1,2,... from PDF helper CSV
+    df = maybe_promote_first_row_to_header(df)
 
     df = df.copy()
     canonical_cols = CANONICAL[section]
