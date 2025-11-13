@@ -1,0 +1,553 @@
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+
+st.set_page_config(
+    page_title="Fundamental Stock Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ---------- CONFIG: MAP YOUR COLUMN NAMES HERE IF NEEDED ----------
+
+COLUMN_MAP = {
+    "income": {
+        "period": "period",
+        "revenue": "revenue",
+        "gross_profit": "gross_profit",
+        "operating_income": "operating_income",
+        "net_income": "net_income",
+        "interest_expense": "interest_expense",     # optional
+        "shares_outstanding": "shares_outstanding", # optional
+    },
+    "balance": {
+        "period": "period",
+        "total_assets": "total_assets",
+        "total_equity": "total_equity",
+        "total_debt": "total_debt",
+        "cash_and_equivalents": "cash_and_equivalents",
+    },
+    "cashflow": {
+        "period": "period",
+        "cash_from_operations": "cash_from_operations",
+        "capital_expenditures": "capital_expenditures",
+    },
+}
+
+# ---------- UTILS ----------
+
+@st.cache_data
+def load_table(file, sheet_name=None):
+    if file is None:
+        return None
+    if file.name.endswith(".csv"):
+        df = pd.read_csv(file)
+    else:
+        df = pd.read_excel(file, sheet_name=sheet_name)
+    return df
+
+
+def normalize_period(df, period_col):
+    if df is None:
+        return None
+    df = df.copy()
+    if period_col not in df.columns:
+        st.error(f"Expected period column '{period_col}' not found in uploaded file.")
+        return None
+    # Try parse to datetime; fall back to string
+    try:
+        df[period_col] = pd.to_datetime(df[period_col])
+    except Exception:
+        df[period_col] = df[period_col].astype(str)
+    df = df.sort_values(period_col)
+    df = df.set_index(period_col)
+    # Convert numeric-like columns to numeric
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="ignore")
+    return df
+
+
+def get_latest_value(df, col):
+    try:
+        return df[col].dropna().iloc[-1]
+    except Exception:
+        return np.nan
+
+
+def compute_cagr(series, years):
+    # series indexed by period, last value is most recent
+    series = series.dropna()
+    if len(series) < 2:
+        return np.nan
+    # Take last and value N years ago (or earliest)
+    end = series.iloc[-1]
+    start_idx = 0
+    if len(series) > years:
+        start_idx = len(series) - years - 1
+    start = series.iloc[start_idx]
+    if start <= 0 or end <= 0:
+        return np.nan
+    n_periods = len(series) - 1 - start_idx
+    if n_periods <= 0:
+        return np.nan
+    return (end / start) ** (1 / n_periods) - 1
+
+
+def safe_div(numerator, denominator):
+    try:
+        if denominator == 0 or pd.isna(denominator):
+            return np.nan
+        return numerator / denominator
+    except Exception:
+        return np.nan
+
+
+def avg_two_periods(series):
+    # average of last two points (or last if only one)
+    s = series.dropna()
+    if len(s) == 0:
+        return np.nan
+    if len(s) == 1:
+        return s.iloc[0]
+    return (s.iloc[-1] + s.iloc[-2]) / 2
+
+
+# ---------- SIDEBAR: INPUTS / FILES ----------
+
+st.sidebar.title("Input Data")
+
+company_name = st.sidebar.text_input("Company name", value="Unknown Company")
+
+freq = st.sidebar.radio("Data frequency", ["Annual", "Quarterly"], index=0)
+
+st.sidebar.markdown("### Upload financial statements")
+
+income_file = st.sidebar.file_uploader("Income Statement (CSV or Excel)", type=["csv", "xlsx"])
+balance_file = st.sidebar.file_uploader("Balance Sheet (CSV or Excel)", type=["csv", "xlsx"])
+cashflow_file = st.sidebar.file_uploader("Cash Flow Statement (CSV or Excel)", type=["csv", "xlsx"])
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Market data (for valuation)")
+
+current_price = st.sidebar.number_input("Current share price", min_value=0.0, value=0.0, step=0.1)
+shares_out = st.sidebar.number_input("Shares outstanding (latest, in same units as statements)", min_value=0.0, value=0.0, step=1.0)
+
+st.sidebar.markdown("If you leave these at 0, valuation ratios won’t be computed.")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### DCF assumptions")
+
+dcf_growth_years = st.sidebar.slider("Projection years", 3, 15, 5)
+dcf_growth_rate = st.sidebar.slider("Growth rate for FCF (%)", -10.0, 30.0, 10.0, step=0.5)
+dcf_discount_rate = st.sidebar.slider("Discount rate (%)", 4.0, 20.0, 10.0, step=0.5)
+dcf_terminal_growth = st.sidebar.slider("Terminal growth (%)", 0.0, 6.0, 2.0, step=0.25)
+
+
+# ---------- LOAD & PREPARE DATA ----------
+
+income_raw = load_table(income_file)
+balance_raw = load_table(balance_file)
+cashflow_raw = load_table(cashflow_file)
+
+if income_raw is not None:
+    income = normalize_period(income_raw, COLUMN_MAP["income"]["period"])
+else:
+    income = None
+
+if balance_raw is not None:
+    balance = normalize_period(balance_raw, COLUMN_MAP["balance"]["period"])
+else:
+    balance = None
+
+if cashflow_raw is not None:
+    cashflow = normalize_period(cashflow_raw, COLUMN_MAP["cashflow"]["period"])
+else:
+    cashflow = None
+
+data_ok = (income is not None) and (balance is not None) and (cashflow is not None)
+
+# ---------- MAIN LAYOUT ----------
+
+st.title(f"Fundamental Dashboard: {company_name}")
+st.caption(f"Frequency: {freq}. Upload new statements to switch companies.")
+
+tabs = st.tabs([
+    "Overview",
+    "Growth",
+    "Profitability",
+    "Risk",
+    "Valuation",
+    "DCF / Fair Value",
+    "Raw Data"
+])
+
+# Helper to ensure plotly has a 'period' column
+def with_period_column(df):
+    df = df.reset_index()
+    first_col = df.columns[0]
+    if first_col != "period":
+        df = df.rename(columns={first_col: "period"})
+    return df
+
+
+# ---------- OVERVIEW TAB ----------
+
+with tabs[0]:
+    st.header("Overview")
+
+    if not data_ok:
+        st.warning("Upload income, balance sheet and cash flow statements to see the dashboard.")
+    else:
+        # Key latest numbers
+        rev_latest = get_latest_value(income, COLUMN_MAP["income"]["revenue"])
+        ni_latest = get_latest_value(income, COLUMN_MAP["income"]["net_income"])
+        assets_latest = get_latest_value(balance, COLUMN_MAP["balance"]["total_assets"])
+        equity_latest = get_latest_value(balance, COLUMN_MAP["balance"]["total_equity"])
+        debt_latest = get_latest_value(balance, COLUMN_MAP["balance"]["total_debt"])
+        cash_latest = get_latest_value(balance, COLUMN_MAP["balance"]["cash_and_equivalents"])
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Latest Revenue", f"{rev_latest:,.0f}" if not pd.isna(rev_latest) else "N/A")
+        col2.metric("Latest Net Income", f"{ni_latest:,.0f}" if not pd.isna(ni_latest) else "N/A")
+        col3.metric("Latest Net Margin", 
+                    f"{safe_div(ni_latest, rev_latest)*100:,.1f}%" 
+                    if not pd.isna(rev_latest) and not pd.isna(ni_latest) else "N/A")
+
+        col4, col5, col6 = st.columns(3)
+        col4.metric("Total Assets", f"{assets_latest:,.0f}" if not pd.isna(assets_latest) else "N/A")
+        col5.metric("Total Equity", f"{equity_latest:,.0f}" if not pd.isna(equity_latest) else "N/A")
+        col6.metric("Total Debt", f"{debt_latest:,.0f}" if not pd.isna(debt_latest) else "N/A")
+
+        if current_price > 0 and shares_out > 0:
+            market_cap = current_price * shares_out
+        else:
+            market_cap = np.nan
+
+        col7, col8, col9 = st.columns(3)
+        col7.metric("Cash & Equivalents", f"{cash_latest:,.0f}" if not pd.isna(cash_latest) else "N/A")
+        col8.metric("Market Cap", f"{market_cap:,.0f}" if not pd.isna(market_cap) else "N/A")
+        if not pd.isna(market_cap) and not pd.isna(ni_latest) and ni_latest != 0:
+            pe = market_cap / ni_latest
+        else:
+            pe = np.nan
+        col9.metric("P/E (latest)", f"{pe:,.1f}" if not pd.isna(pe) else "N/A")
+
+        st.subheader("Revenue and Net Income over time")
+        rev_series = income[COLUMN_MAP["income"]["revenue"]].rename("Revenue")
+        ni_series = income[COLUMN_MAP["income"]["net_income"]].rename("Net Income")
+
+        plot_df = pd.concat([rev_series, ni_series], axis=1)
+        plot_df = with_period_column(plot_df)
+        fig = px.line(plot_df, x="period", y=["Revenue", "Net Income"], markers=True)
+        fig.update_layout(legend_title_text="")
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# ---------- GROWTH TAB ----------
+
+with tabs[1]:
+    st.header("Growth")
+
+    if not data_ok:
+        st.warning("Upload all three statements first.")
+    else:
+        revenue = income[COLUMN_MAP["income"]["revenue"]]
+        net_income_series = income[COLUMN_MAP["income"]["net_income"]]
+
+        growth_horizon = st.selectbox("Growth horizon (for CAGR)", [3, 4, 5, 7, 10], index=2)
+        rev_cagr = compute_cagr(revenue, growth_horizon)
+        ni_cagr = compute_cagr(net_income_series, growth_horizon)
+
+        col1, col2 = st.columns(2)
+        col1.metric(f"Revenue CAGR (approx, last {growth_horizon} periods)", 
+                    f"{rev_cagr*100:,.1f}%" if not pd.isna(rev_cagr) else "N/A")
+        col2.metric(f"Net Income CAGR (approx, last {growth_horizon} periods)", 
+                    f"{ni_cagr*100:,.1f}%" if not pd.isna(ni_cagr) else "N/A")
+
+        st.subheader("YoY / QoQ growth")
+        growth_df = income[[COLUMN_MAP["income"]["revenue"], COLUMN_MAP["income"]["net_income"]]].copy()
+        growth_df["Revenue growth %"] = growth_df[COLUMN_MAP["income"]["revenue"]].pct_change() * 100
+        growth_df["Net income growth %"] = growth_df[COLUMN_MAP["income"]["net_income"]].pct_change() * 100
+
+        plot_df = growth_df[["Revenue growth %", "Net income growth %"]].dropna().copy()
+        if not plot_df.empty:
+            plot_df = with_period_column(plot_df)
+            fig = px.bar(plot_df, x="period", y=["Revenue growth %", "Net income growth %"], barmode="group")
+            fig.update_layout(legend_title_text="")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Need at least two periods to calculate growth.")
+
+
+# ---------- PROFITABILITY TAB ----------
+
+with tabs[2]:
+    st.header("Profitability")
+
+    if not data_ok:
+        st.warning("Upload all three statements first.")
+    else:
+        cols = COLUMN_MAP["income"]
+        rev_col = cols["revenue"]
+        gp_col = cols["gross_profit"]
+        op_col = cols["operating_income"]
+        ni_col = cols["net_income"]
+
+        df = income[[rev_col, gp_col, op_col, ni_col]].copy()
+        df["Gross margin %"] = safe_div(df[gp_col], df[rev_col]) * 100
+        df["Operating margin %"] = safe_div(df[op_col], df[rev_col]) * 100
+        df["Net margin %"] = safe_div(df[ni_col], df[rev_col]) * 100
+
+        # ROE & ROA using average assets/equity (simple)
+        assets = balance[COLUMN_MAP["balance"]["total_assets"]]
+        equity = balance[COLUMN_MAP["balance"]["total_equity"]]
+        # Align by index
+        ni_aligned = income[ni_col].reindex(assets.index).fillna(method="ffill")
+        avg_assets = (assets + assets.shift(1)) / 2
+        avg_equity = (equity + equity.shift(1)) / 2
+
+        roe = safe_div(ni_aligned, avg_equity) * 100
+        roa = safe_div(ni_aligned, avg_assets) * 100
+
+        latest_roe = roe.dropna().iloc[-1] if roe.dropna().size > 0 else np.nan
+        latest_roa = roa.dropna().iloc[-1] if roa.dropna().size > 0 else np.nan
+
+        col1, col2 = st.columns(2)
+        col1.metric("Latest ROE", f"{latest_roe:,.1f}%" if not pd.isna(latest_roe) else "N/A")
+        col2.metric("Latest ROA", f"{latest_roa:,.1f}%" if not pd.isna(latest_roa) else "N/A")
+
+        st.subheader("Margins over time")
+        plot_df = df[["Gross margin %", "Operating margin %", "Net margin %"]].dropna(how="all")
+        if not plot_df.empty:
+            plot_df = with_period_column(plot_df)
+            fig = px.line(plot_df, x="period", y=["Gross margin %", "Operating margin %", "Net margin %"], markers=True)
+            fig.update_layout(legend_title_text="")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No margin data available.")
+
+        st.subheader("ROE and ROA over time")
+        roa_roe_df = pd.concat([roa.rename("ROA %"), roe.rename("ROE %")], axis=1).dropna(how="all")
+        if not roa_roe_df.empty:
+            roa_roe_df = with_period_column(roa_roe_df)
+            fig2 = px.line(roa_roe_df, x="period", y=["ROA %", "ROE %"], markers=True)
+            fig2.update_layout(legend_title_text="")
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.info("Need at least two periods of assets/equity and income for ROA/ROE trends.")
+
+
+# ---------- RISK TAB ----------
+
+with tabs[3]:
+    st.header("Risk")
+
+    if not data_ok:
+        st.warning("Upload all three statements first.")
+    else:
+        debt = balance[COLUMN_MAP["balance"]["total_debt"]]
+        equity = balance[COLUMN_MAP["balance"]["total_equity"]]
+        assets = balance[COLUMN_MAP["balance"]["total_assets"]]
+        cash = balance[COLUMN_MAP["balance"]["cash_and_equivalents"]]
+
+        debt_to_equity = safe_div(debt, equity)
+        debt_to_assets = safe_div(debt, assets)
+        net_debt = debt - cash
+        net_debt_to_equity = safe_div(net_debt, equity)
+
+        latest_de = debt_to_equity.dropna().iloc[-1] if debt_to_equity.dropna().size > 0 else np.nan
+        latest_da = debt_to_assets.dropna().iloc[-1] if debt_to_assets.dropna().size > 0 else np.nan
+        latest_nde = net_debt_to_equity.dropna().iloc[-1] if net_debt_to_equity.dropna().size > 0 else np.nan
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Debt / Equity (latest)", f"{latest_de:,.2f}" if not pd.isna(latest_de) else "N/A")
+        col2.metric("Debt / Assets (latest)", f"{latest_da:,.2f}" if not pd.isna(latest_da) else "N/A")
+        col3.metric("Net Debt / Equity (latest)", f"{latest_nde:,.2f}" if not pd.isna(latest_nde) else "N/A")
+
+        st.subheader("Leverage ratios over time")
+        risk_df = pd.concat(
+            [
+                debt_to_equity.rename("Debt/Equity"),
+                debt_to_assets.rename("Debt/Assets"),
+                net_debt_to_equity.rename("Net Debt/Equity"),
+            ],
+            axis=1,
+        ).dropna(how="all")
+        if not risk_df.empty:
+            risk_df = with_period_column(risk_df)
+            fig = px.line(risk_df, x="period", y=["Debt/Equity", "Debt/Assets", "Net Debt/Equity"], markers=True)
+            fig.update_layout(legend_title_text="")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Interest coverage (if interest expense available)
+        int_col = COLUMN_MAP["income"]["interest_expense"]
+        if (income is not None) and (int_col in income.columns):
+            try:
+                op_inc = income[COLUMN_MAP["income"]["operating_income"]]
+                interest_exp = income[int_col].replace(0, np.nan)
+                int_cov = safe_div(op_inc, interest_exp)
+                latest_cov = int_cov.dropna().iloc[-1]
+                st.subheader("Interest coverage")
+                st.metric("Latest interest coverage (EBIT / interest)", f"{latest_cov:,.1f}x")
+                ic_df = int_cov.rename("Interest coverage").dropna()
+                if not ic_df.empty:
+                    ic_df = with_period_column(ic_df)
+                    fig2 = px.line(ic_df, x="period", y="Interest coverage", markers=True)
+                    st.plotly_chart(fig2, use_container_width=True)
+            except Exception:
+                st.info("Could not compute interest coverage (check interest_expense column).")
+        else:
+            st.info("No 'interest_expense' column found in income statement – interest coverage not computed.")
+
+
+# ---------- VALUATION TAB ----------
+
+with tabs[4]:
+    st.header("Valuation")
+
+    if not data_ok:
+        st.warning("Upload all three statements first.")
+    else:
+        if current_price <= 0 or shares_out <= 0:
+            st.warning("Enter current share price and shares outstanding in the sidebar to compute valuation ratios.")
+        else:
+            market_cap = current_price * shares_out
+
+            rev_latest = get_latest_value(income, COLUMN_MAP["income"]["revenue"])
+            ni_latest = get_latest_value(income, COLUMN_MAP["income"]["net_income"])
+            equity_latest = get_latest_value(balance, COLUMN_MAP["balance"]["total_equity"])
+            debt_latest = get_latest_value(balance, COLUMN_MAP["balance"]["total_debt"])
+            cash_latest = get_latest_value(balance, COLUMN_MAP["balance"]["cash_and_equivalents"])
+
+            ev = market_cap + (debt_latest if not pd.isna(debt_latest) else 0) - (cash_latest if not pd.isna(cash_latest) else 0)
+
+            # Simple EBITDA approximation: operating income + depreciation&amort if you have it.
+            # For now we’ll just use operating income as a rough proxy.
+            op_income_latest = get_latest_value(income, COLUMN_MAP["income"]["operating_income"])
+
+            pe = safe_div(market_cap, ni_latest)
+            ps = safe_div(market_cap, rev_latest)
+            pb = safe_div(market_cap, equity_latest)
+            ev_sales = safe_div(ev, rev_latest)
+            ev_ebit = safe_div(ev, op_income_latest)
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Market Cap", f"{market_cap:,.0f}")
+            col2.metric("Enterprise Value (approx)", f"{ev:,.0f}")
+            col3.metric("Latest EPS (approx)", 
+                        f"{safe_div(ni_latest, shares_out):.2f}" if shares_out > 0 and not pd.isna(ni_latest) else "N/A")
+
+            col4, col5, col6 = st.columns(3)
+            col4.metric("P/E", f"{pe:,.1f}" if not pd.isna(pe) else "N/A")
+            col5.metric("P/S", f"{ps:,.2f}" if not pd.isna(ps) else "N/A")
+            col6.metric("P/B", f"{pb:,.2f}" if not pd.isna(pb) else "N/A")
+
+            col7, col8 = st.columns(2)
+            col7.metric("EV / Sales", f"{ev_sales:,.2f}" if not pd.isna(ev_sales) else "N/A")
+            col8.metric("EV / EBIT (proxy)", f"{ev_ebit:,.1f}" if not pd.isna(ev_ebit) else "N/A")
+
+            st.subheader("Historical valuation bands (simple)")
+
+            # Simple historical P/S based on past revenue and current market cap
+            ps_hist = market_cap / income[COLUMN_MAP["income"]["revenue"]]
+            ps_df = ps_hist.rename("P/S (using current price)").dropna()
+            if not ps_df.empty:
+                ps_df = with_period_column(ps_df)
+                fig = px.line(ps_df, x="period", y="P/S (using current price)", markers=True)
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.caption("Historical multiples are recalculated using current price, so they show how today's price relates to past fundamentals.")
+
+
+# ---------- DCF TAB ----------
+
+with tabs[5]:
+    st.header("DCF / Fair Value (very simple model)")
+
+    if not data_ok:
+        st.warning("Upload all three statements first.")
+    else:
+        # Free cash flow = cash from operations - capex
+        cfo = cashflow[COLUMN_MAP["cashflow"]["cash_from_operations"]]
+        capex = cashflow[COLUMN_MAP["cashflow"]["capital_expenditures"]]
+        # Some datasets store capex as negative – ensure we treat it correctly
+        fcf = cfo + capex  # if capex is negative, this is CFO - |Capex|
+
+        st.subheader("Historical Free Cash Flow")
+        fcf_df = fcf.rename("FCF").dropna()
+        if not fcf_df.empty:
+            fcf_df = with_period_column(fcf_df)
+            fig = px.bar(fcf_df, x="period", y="FCF")
+            st.plotly_chart(fig, use_container_width=True)
+
+        latest_fcf = fcf.dropna().iloc[-1] if fcf.dropna().size > 0 else np.nan
+        avg_fcf = fcf.dropna().tail(3).mean() if fcf.dropna().size > 0 else np.nan
+
+        col1, col2 = st.columns(2)
+        col1.metric("Latest FCF", f"{latest_fcf:,.0f}" if not pd.isna(latest_fcf) else "N/A")
+        col2.metric("Average FCF (last 3 periods)", f"{avg_fcf:,.0f}" if not pd.isna(avg_fcf) else "N/A")
+
+        if shares_out <= 0:
+            st.warning("Enter shares outstanding in the sidebar to get per-share fair value.")
+        else:
+            base_fcf = avg_fcf if not pd.isna(avg_fcf) else latest_fcf
+            if pd.isna(base_fcf):
+                st.error("Cannot compute DCF – no valid FCF data.")
+            else:
+                g = dcf_growth_rate / 100.0
+                r = dcf_discount_rate / 100.0
+                tg = dcf_terminal_growth / 100.0
+                n = dcf_growth_years
+
+                # Project FCFs
+                projected_fcfs = []
+                for t in range(1, n + 1):
+                    fcf_t = base_fcf * ((1 + g) ** t)
+                    projected_fcfs.append(fcf_t)
+
+                # Discount factors and PV of projected FCFs
+                discounted_fcfs = [fcf_t / ((1 + r) ** t) for t, fcf_t in enumerate(projected_fcfs, start=1)]
+
+                # Terminal value at year n
+                terminal_fcf = projected_fcfs[-1] * (1 + tg)
+                terminal_value = terminal_fcf / (r - tg) if r > tg else np.nan
+                discounted_tv = terminal_value / ((1 + r) ** n) if not pd.isna(terminal_value) else np.nan
+
+                intrinsic_equity_value = sum(discounted_fcfs) + (discounted_tv if not pd.isna(discounted_tv) else 0)
+                fair_value_per_share = intrinsic_equity_value / shares_out
+
+                col3, col4 = st.columns(2)
+                col3.metric("Intrinsic equity value", f"{intrinsic_equity_value:,.0f}")
+                col4.metric("DCF fair value / share", f"{fair_value_per_share:,.2f}")
+
+                if current_price > 0:
+                    upside = (fair_value_per_share / current_price - 1) * 100
+                    st.metric("Upside vs current price", f"{upside:,.1f}%")
+
+                st.caption("This is a very simplified DCF. Change growth/discount/terminal rates in the sidebar to stress-test scenarios.")
+
+
+# ---------- RAW DATA TAB ----------
+
+with tabs[6]:
+    st.header("Raw Data")
+
+    st.subheader("Income Statement")
+    if income is not None:
+        st.dataframe(income)
+    else:
+        st.info("No income statement uploaded.")
+
+    st.subheader("Balance Sheet")
+    if balance is not None:
+        st.dataframe(balance)
+    else:
+        st.info("No balance sheet uploaded.")
+
+    st.subheader("Cash Flow Statement")
+    if cashflow is not None:
+        st.dataframe(cashflow)
+    else:
+        st.info("No cash flow statement uploaded.")
