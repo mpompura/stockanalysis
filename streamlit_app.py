@@ -3,6 +3,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import PyPDF2
+import io
 
 st.set_page_config(
     page_title="Fundamental Stock Dashboard",
@@ -38,14 +40,44 @@ COLUMN_MAP = {
 
 # ---------- UTILS ----------
 
+
 @st.cache_data
 def load_table(file, sheet_name=None):
     if file is None:
         return None
-    if file.name.endswith(".csv"):
+    name = file.name.lower()
+    if name.endswith(".csv"):
         df = pd.read_csv(file)
-    else:
+    elif name.endswith(".xlsx") or name.endswith(".xls"):
         df = pd.read_excel(file, sheet_name=sheet_name)
+    elif name.endswith(".pdf"):
+        # Very simple PDF-to-table heuristic: extract text and try to interpret it as CSV-like.
+        # This will often need manual cleanup, but can give you a quick starting point.
+        reader = PyPDF2.PdfReader(file)
+        text_pages = []
+        for page in reader.pages:
+            try:
+                text_pages.append(page.extract_text() or "")
+            except Exception:
+                continue
+        full_text = "\n".join(text_pages)
+
+        # Heuristic: collapse multiple spaces into a single comma; keep only lines containing digits
+        lines = full_text.splitlines()
+        processed_lines = []
+        for ln in lines:
+            if any(ch.isdigit() for ch in ln):
+                # replace runs of whitespace with comma
+                s = re.sub(r"\s+", ",", ln.strip())
+                # basic sanity: at least 2 columns
+                if s.count(",") >= 1:
+                    processed_lines.append(s)
+        if not processed_lines:
+            return None
+        csv_like = "\n".join(processed_lines)
+        df = pd.read_csv(io.StringIO(csv_like), header=None)
+    else:
+        return None
     return df
 
 
@@ -124,9 +156,9 @@ freq = st.sidebar.radio("Data frequency", ["Annual", "Quarterly"], index=0)
 
 st.sidebar.markdown("### Upload financial statements")
 
-income_file = st.sidebar.file_uploader("Income Statement (CSV or Excel)", type=["csv", "xlsx"])
-balance_file = st.sidebar.file_uploader("Balance Sheet (CSV or Excel)", type=["csv", "xlsx"])
-cashflow_file = st.sidebar.file_uploader("Cash Flow Statement (CSV or Excel)", type=["csv", "xlsx"])
+income_file = st.sidebar.file_uploader("Income Statement (CSV, Excel or PDF)", type=["csv", "xlsx", "pdf"])
+balance_file = st.sidebar.file_uploader("Balance Sheet (CSV, Excel or PDF)", type=["csv", "xlsx", "pdf"])
+cashflow_file = st.sidebar.file_uploader("Cash Flow Statement (CSV, Excel or PDF)", type=["csv", "xlsx", "pdf"])
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Market data (for valuation)")
@@ -180,7 +212,8 @@ tabs = st.tabs([
     "Risk",
     "Valuation",
     "DCF / Fair Value",
-    "Raw Data"
+    "Raw Data",
+    "PDF Helper"
 ])
 
 # Helper to ensure plotly has a 'period' column
@@ -551,3 +584,34 @@ with tabs[6]:
         st.dataframe(cashflow)
     else:
         st.info("No cash flow statement uploaded.")
+
+
+# ---------- PDF HELPER TAB ----------
+
+with tabs[7]:
+    st.header("PDF Helper (experimental)")
+    st.write(
+        "You can upload a PDF financial statement here. The app will try a very simple text extraction and "
+        "convert it into a rough table. You will usually still need to clean the result manually and then "
+        "save it as CSV/Excel for the main dashboard."
+    )
+
+    pdf_file = st.file_uploader("Upload a PDF file to preview parsed table", type=["pdf"], key="pdf_helper_uploader")
+    if pdf_file is not None:
+        tmp_df = load_table(pdf_file)
+        if tmp_df is None or tmp_df.empty:
+            st.error("Could not extract a usable table from this PDF with the simple parser. "
+                     "You may need to open it manually and copy-paste into Excel/CSV.")
+        else:
+            st.subheader("Extracted table (best-effort)")
+            st.dataframe(tmp_df)
+
+            # Offer CSV download
+            csv_bytes = tmp_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download as CSV (clean it manually, then re-upload as Income/Balance/Cashflow)",
+                data=csv_bytes,
+                file_name="parsed_from_pdf.csv",
+                mime="text/csv",
+            )
+
