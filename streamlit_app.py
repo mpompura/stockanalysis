@@ -230,8 +230,15 @@ def safe_div(a, b):
         return np.nan
 
 def get_latest(series):
+    """Return the last non-NaN element of a pandas Series, or handle scalars gracefully."""
     if series is None:
         return np.nan
+    # If it's a scalar (float/int), just return it
+    if not hasattr(series, "dropna"):
+        try:
+            return float(series)
+        except Exception:
+            return np.nan
     s = series.dropna()
     return s.iloc[-1] if not s.empty else np.nan
 
