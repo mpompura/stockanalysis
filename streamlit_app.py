@@ -16,135 +16,95 @@ st.set_page_config(
 # =====================
 
 def _norm(s: str) -> str:
-    """Normalize strings for fuzzy matching."""
     s = str(s).lower()
     s = re.sub(r"[^a-z0-9]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 def find_metric_col(df: pd.DataFrame) -> str | None:
-    """Find the metric column (expects something like 'Metric')."""
     for c in df.columns:
         if _norm(c) == "metric":
             return c
-    # fallback: first column
     return df.columns[0] if len(df.columns) > 0 else None
 
 def find_best_metric_row(df: pd.DataFrame, aliases) -> pd.Series | None:
-    """Return row whose metric label best matches any alias."""
     if df is None or df.empty:
         return None
-
     metric_col = find_metric_col(df)
     if metric_col is None:
         return None
-
-    metrics_norm = df[metric_col].astype(str).map(_norm)
-
-    # exact normalized match
+    norms = df[metric_col].astype(str).map(_norm)
+    # exact first
     for cand in aliases:
-        cand_norm = _norm(cand)
-        match = df.loc[metrics_norm == cand_norm]
-        if not match.empty:
-            return match.iloc[0]
-
+        n = _norm(cand)
+        hit = df.loc[norms == n]
+        if not hit.empty:
+            return hit.iloc[0]
     # contains / startswith
     for cand in aliases:
-        cand_norm = _norm(cand)
-        mask = metrics_norm.apply(lambda x: cand_norm in x or x.startswith(cand_norm))
-        match = df.loc[mask]
-        if not match.empty:
-            return match.iloc[0]
-
+        n = _norm(cand)
+        hit = df.loc[norms.apply(lambda x: n in x or x.startswith(n))]
+        if not hit.empty:
+            return hit.iloc[0]
     return None
 
 def parse_period_label(label: str):
-    """Parse period labels like '2024', 'Dec 2024' into datetime where possible."""
-    label_str = str(label).strip()
-    # pure year
-    if re.fullmatch(r"\d{4}", label_str):
+    s = str(label).strip()
+    # year only
+    if re.fullmatch(r"\d{4}", s):
         try:
-            return pd.to_datetime(label_str + "-12-31")
+            return pd.to_datetime(s + "-12-31")
         except Exception:
-            return label_str
-    # 'Dec 2024'
-    m = re.match(r"([A-Za-z]{3})\s+(\d{4})", label_str)
+            return s
+    # e.g. Dec 2024
+    m = re.match(r"([A-Za-z]{3})\s+(\d{4})", s)
     if m:
-        dt = pd.to_datetime(label_str, errors="coerce")
-        return dt if not pd.isna(dt) else label_str
-    # otherwise keep as string (e.g. TTM)
-    return label_str
+        dt = pd.to_datetime(s, errors="coerce")
+        return dt if not pd.isna(dt) else s
+    return s
 
-def metric_table_to_timeseries(df: pd.DataFrame, metric_aliases: dict, drop_ttm: bool = True) -> pd.DataFrame | None:
-    """
-    Convert a metric-row CSV into a time series.
-
-    Input format:
-        - One column 'Metric' (or similar) with metric names.
-        - Remaining columns are periods (TTM, 2024, 2023, ...).
-
-    metric_aliases: { canonical_name: [alias1, alias2, ...] }
-
-    Output:
-        DataFrame indexed by period, columns = canonical_name.
-    """
+def metric_table_to_timeseries(df: pd.DataFrame, metric_aliases: dict, drop_ttm: bool = True):
     if df is None or df.empty:
         return None
-
     metric_col = find_metric_col(df)
     if metric_col is None:
-        st.error(f"Could not find a metric column. Columns: {list(df.columns)}")
+        st.error(f"Could not find metric column. Columns: {list(df.columns)}")
         return None
-
     period_cols = [c for c in df.columns if c != metric_col]
-
-    # Optional: drop TTM-like columns
-    period_cols_clean = []
+    clean_cols = []
     for c in period_cols:
         if drop_ttm and _norm(c) in ("ttm", "trailing twelve months"):
             continue
-        period_cols_clean.append(c)
-
-    if not period_cols_clean:
-        st.error("No usable period columns found (after dropping TTM).")
+        clean_cols.append(c)
+    if not clean_cols:
+        st.error("No usable period columns (TTM dropped).")
         return None
-
-    # Build result: index = period labels, columns = canonical metrics
-    result = pd.DataFrame(index=period_cols_clean)
-
+    out = pd.DataFrame(index=clean_cols)
     for canon, aliases in metric_aliases.items():
         row = find_best_metric_row(df, aliases)
         if row is None:
-            # optional, skip if not found
             continue
-        vals = pd.to_numeric(row[period_cols_clean], errors="coerce")
-        result[canon] = vals
-
-    # Parse periods
-    parsed_index = [parse_period_label(lbl) for lbl in result.index]
-    result.index = parsed_index
-
-    # Sort index if possible
+        vals = pd.to_numeric(row[clean_cols], errors="coerce")
+        out[canon] = vals
+    out.index = [parse_period_label(x) for x in out.index]
     try:
-        result = result.sort_index()
+        out = out.sort_index()
     except Exception:
         pass
-
-    return result
+    return out
 
 # =====================
-# Canonical metrics & alias lists tuned for your CSVs
+# Metric alias maps tuned to your CSVs
 # =====================
 
 INCOME_METRICS = {
-    # revenue-like line; your CSV has both 'Revenue' and 'Total Revenues'
     "revenue": [
         "Total Revenues",
         "Total Revenue",
         "Revenue",
         "Revenue Before Loan Losses",
     ],
-    # IMPORTANT: prefer the "Net Income to Common Incl Extra Items" line over EPS-like rows
+    # prefer full net income row, not EPS
     "net_income": [
         "Net Income to Common Incl Extra Items",
         "Net Income to Company",
@@ -159,7 +119,6 @@ INCOME_METRICS = {
         "Operating Income",
         "Income From Operations",
     ],
-    # For a bank, "Net Interest Income" is a rough proxy for gross profit
     "gross_profit": [
         "Net Interest Income",
         "Gross Profit",
@@ -221,18 +180,13 @@ CASHFLOW_METRICS = {
 }
 
 # =====================
-# Utility funcs for ratios / display
+# Utility functions
 # =====================
 
 def safe_div(a, b):
-    """
-    Safe division that works for scalars AND pandas Series.
-    For Series, performs elementwise division and treats 0 denominators as NaN.
-    """
     import pandas as _pd
     import numpy as _np
-
-    # If either is a pandas Series/DataFrame, do elementwise division
+    # vector case
     if isinstance(a, (_pd.Series, _pd.DataFrame)) or isinstance(b, (_pd.Series, _pd.DataFrame)):
         try:
             if isinstance(a, _pd.Series):
@@ -242,7 +196,6 @@ def safe_div(a, b):
                     a_ser = _pd.Series([a] * len(b), index=b.index)
                 else:
                     a_ser = _pd.Series([a])
-
             if isinstance(b, _pd.Series):
                 b_ser = b.replace(0, _np.nan)
             else:
@@ -250,7 +203,6 @@ def safe_div(a, b):
                     b_ser = _pd.Series([b] * len(a), index=a.index)
                 else:
                     b_ser = _pd.Series([b])
-
             return a_ser / b_ser
         except Exception:
             if hasattr(a, "index"):
@@ -258,8 +210,7 @@ def safe_div(a, b):
             if hasattr(b, "index"):
                 return _pd.Series(_np.nan, index=b.index)
             return _np.nan
-
-    # Scalar case
+    # scalar
     try:
         if b == 0 or _pd.isna(b):
             return _np.nan
@@ -268,8 +219,6 @@ def safe_div(a, b):
         return _np.nan
 
 def get_latest(series):
-    """Return the last non-NaN element of a pandas Series, or handle scalars gracefully."""
-    import pandas as _pd
     import numpy as _np
     if series is None:
         return _np.nan
@@ -287,11 +236,13 @@ def with_period_col(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def tail_periods(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
-    """Return last n rows by index (period)."""
     try:
         return df.tail(n)
     except Exception:
         return df
+
+def show_plot(fig, key: str):
+    st.plotly_chart(fig, use_container_width=True, key=key)
 
 # =====================
 # Sidebar
@@ -362,7 +313,7 @@ with tabs[0]:
         c3.metric(
             "Net Margin",
             f"{safe_div(ni_latest, rev_latest)*100:,.1f}%"
-            if (not pd.isna(rev_latest) and not pd.isna(ni_latest) and rev_latest != 0)
+            if (not pd.isna(rev_latest) and not pd.isna(ni_latest) and rev_latest not in (0, np.nan))
             else "N/A",
         )
 
@@ -378,7 +329,6 @@ with tabs[0]:
         pe = safe_div(market_cap, ni_latest)
         c9.metric("P/E", f"{pe:,.1f}" if not pd.isna(pe) else "N/A")
 
-        # Charts: Revenue & Net Income lines + bar of last periods
         if income is not None and "revenue" in income.columns and "net_income" in income.columns:
             df_plot = pd.concat(
                 [
@@ -390,12 +340,12 @@ with tabs[0]:
             df_plot = with_period_col(df_plot)
             fig = px.line(df_plot, x="period", y=["Revenue", "Net Income"], markers=True)
             fig.update_layout(legend_title_text="")
-            st.plotly_chart(fig, use_container_width=True)
+            show_plot(fig, key="overview_rev_ni_line")
 
-            df_bar = tail_periods(df_plot.set_index("period"), 5).reset_index()
-            fig2 = px.bar(df_bar, x="period", y=["Revenue", "Net Income"], barmode="group")
+            df_tail = tail_periods(df_plot.set_index("period"), 5).reset_index()
+            fig2 = px.bar(df_tail, x="period", y=["Revenue", "Net Income"], barmode="group")
             fig2.update_layout(legend_title_text="")
-            st.plotly_chart(fig2, use_container_width=True)
+            show_plot(fig2, key="overview_rev_ni_bar")
 
 # =====================
 # Growth
@@ -424,9 +374,8 @@ with tabs[1]:
             df_g = with_period_col(df_g)
             fig = px.bar(df_g, x="period", y=df_g.columns, barmode="group")
             fig.update_layout(legend_title_text="")
-            st.plotly_chart(fig, use_container_width=True)
+            show_plot(fig, key="growth_yoy_bar")
 
-        # Also show revenue & net income levels here
         df_levels = pd.concat(
             [rev.rename("Revenue"), ni.rename("Net Income")],
             axis=1,
@@ -434,7 +383,7 @@ with tabs[1]:
         df_levels = with_period_col(df_levels)
         fig2 = px.line(df_levels, x="period", y=["Revenue", "Net Income"], markers=True)
         fig2.update_layout(legend_title_text="")
-        st.plotly_chart(fig2, use_container_width=True)
+        show_plot(fig2, key="growth_levels_line")
 
 # =====================
 # Profitability
@@ -447,7 +396,6 @@ with tabs[2]:
         st.warning("Upload all three CSVs first.")
     else:
         df = pd.DataFrame(index=income.index)
-
         if "revenue" in income.columns:
             df["revenue"] = income["revenue"]
         if "gross_profit" in income.columns:
@@ -493,7 +441,7 @@ with tabs[2]:
                 roa_roe_df = with_period_col(roa_roe_df)
                 fig = px.line(roa_roe_df, x="period", y=["ROA %", "ROE %"], markers=True)
                 fig.update_layout(legend_title_text="")
-                st.plotly_chart(fig, use_container_width=True)
+                show_plot(fig, key="profit_roa_roe_line")
 
         margin_cols = [c for c in ["Gross margin %", "Operating margin %", "Net margin %"] if c in df.columns]
         if margin_cols:
@@ -502,13 +450,12 @@ with tabs[2]:
                 margin_df = with_period_col(margin_df)
                 fig2 = px.line(margin_df, x="period", y=margin_cols, markers=True)
                 fig2.update_layout(legend_title_text="")
-                st.plotly_chart(fig2, use_container_width=True)
+                show_plot(fig2, key="profit_margins_line")
 
-                # bar of last few periods margins
                 md_tail = tail_periods(margin_df.set_index("period"), 5).reset_index()
                 fig3 = px.bar(md_tail, x="period", y=margin_cols, barmode="group")
                 fig3.update_layout(legend_title_text="")
-                st.plotly_chart(fig3, use_container_width=True)
+                show_plot(fig3, key="profit_margins_bar")
 
 # =====================
 # Risk
@@ -551,9 +498,8 @@ with tabs[3]:
                 risk_df = with_period_col(risk_df)
                 fig = px.line(risk_df, x="period", y=risk_df.columns, markers=True)
                 fig.update_layout(legend_title_text="")
-                st.plotly_chart(fig, use_container_width=True)
+                show_plot(fig, key="risk_leverage_line")
 
-                # stacked bar of debt vs equity for last few periods
                 cap_df = pd.concat(
                     [debt.rename("Debt"), equity.rename("Equity")],
                     axis=1,
@@ -563,9 +509,8 @@ with tabs[3]:
                     cap_tail = with_period_col(cap_tail)
                     fig2 = px.bar(cap_tail, x="period", y=["Debt", "Equity"], barmode="stack")
                     fig2.update_layout(legend_title_text="")
-                    st.plotly_chart(fig2, use_container_width=True)
+                    show_plot(fig2, key="risk_cap_structure_bar")
 
-        # Interest coverage
         if income is not None and "operating_income" in income.columns and "interest_expense" in income.columns:
             ebit = income["operating_income"]
             int_exp = income["interest_expense"].replace(0, np.nan)
@@ -579,7 +524,7 @@ with tabs[3]:
                 if not cov_df.empty:
                     cov_df = with_period_col(cov_df)
                     fig = px.line(cov_df, x="period", y="Interest coverage", markers=True)
-                    st.plotly_chart(fig, use_container_width=True)
+                    show_plot(fig, key="risk_cov_line")
             else:
                 cov_latest = get_latest(cov)
                 st.metric("EBIT / Interest (latest)", f"{cov_latest:,.1f}x" if not pd.isna(cov_latest) else "N/A")
@@ -606,11 +551,13 @@ with tabs[4]:
             equity_latest = get_latest(balance.get("total_equity") if balance is not None else None)
             debt_latest = get_latest(balance.get("total_debt") if balance is not None else None)
             cash_latest = get_latest(balance.get("cash_and_equivalents") if balance is not None else None)
+
             ev = market_cap
             if not pd.isna(debt_latest):
                 ev += debt_latest
             if not pd.isna(cash_latest):
                 ev -= cash_latest
+
             op_inc_latest = get_latest(income.get("operating_income") if income is not None else None)
 
             pe = safe_div(market_cap, ni_latest)
@@ -638,7 +585,6 @@ with tabs[4]:
             c7.metric("EV/Sales", f"{ev_sales:,.2f}" if not pd.isna(ev_sales) else "N/A")
             c8.metric("EV/EBIT", f"{ev_ebit:,.1f}" if not pd.isna(ev_ebit) else "N/A")
 
-            # History of P/S and optionally EV/EBIT using current price
             if income is not None and "revenue" in income.columns:
                 ps_hist = market_cap / income["revenue"]
                 ps_hist = ps_hist.rename("P/S (using current price)").dropna()
@@ -646,16 +592,17 @@ with tabs[4]:
                     ps_df = with_period_col(ps_hist.to_frame())
                     fig = px.line(ps_df, x="period", y="P/S (using current price)", markers=True)
                     fig.update_layout(legend_title_text="")
-                    st.plotly_chart(fig, use_container_width=True)
+                    show_plot(fig, key="val_ps_hist_line")
 
             if income is not None and "operating_income" in income.columns:
                 ev_ebit_hist = safe_div(ev, income["operating_income"])
-                ev_ebit_hist = ev_ebit_hist.rename("EV/EBIT (using current price)").dropna()
-                if not ev_ebit_hist.empty:
-                    ev_df = with_period_col(ev_ebit_hist.to_frame())
-                    fig2 = px.line(ev_df, x="period", y="EV/EBIT (using current price)", markers=True)
-                    fig2.update_layout(legend_title_text="")
-                    st.plotly_chart(fig2, use_container_width=True)
+                if hasattr(ev_ebit_hist, "rename"):
+                    ev_ebit_hist = ev_ebit_hist.rename("EV/EBIT (using current price)").dropna()
+                    if not ev_ebit_hist.empty:
+                        ev_df = with_period_col(ev_ebit_hist.to_frame())
+                        fig2 = px.line(ev_df, x="period", y="EV/EBIT (using current price)", markers=True)
+                        fig2.update_layout(legend_title_text="")
+                        show_plot(fig2, key="val_ev_ebit_hist_line")
 
 # =====================
 # DCF
@@ -709,12 +656,11 @@ with tabs[5]:
 
                 st.caption("Toy DCF only. Adjust growth/discount/terminal rates to stress-test.")
 
-                # Show projected FCFs
                 years = list(range(1, n + 1))
                 proj_df = pd.DataFrame({"Year": years, "Projected FCF": proj_fcfs, "Discounted FCF": disc_fcfs})
                 fig = px.bar(proj_df, x="Year", y=["Projected FCF", "Discounted FCF"], barmode="group")
                 fig.update_layout(legend_title_text="")
-                st.plotly_chart(fig, use_container_width=True)
+                show_plot(fig, key="dcf_proj_bar")
 
 # =====================
 # Raw Data
