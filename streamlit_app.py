@@ -73,7 +73,7 @@ def metric_table_to_timeseries(df: pd.DataFrame, metric_aliases: dict, drop_ttm:
     period_cols = [c for c in df.columns if c != metric_col]
     clean_cols = []
     for c in period_cols:
-        if drop_ttm and _norm(c) in ("ttm", "trailing twelve months"):
+        if drop_ttm and _norm(c) in ("ttm", "trailing twelve months", "last report"):
             continue
         clean_cols.append(c)
     if not clean_cols:
@@ -149,6 +149,7 @@ BALANCE_METRICS = {
         "Total Equity Attributable To Shareholders",
     ],
     "total_debt": [
+        "Total Short & Long Term Debt",
         "Total Debt",
         "Total Interest-Bearing Debt",
         "Total Liabilities And Debt",

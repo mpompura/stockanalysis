@@ -1,5 +1,5 @@
 
-# Fundamental Dashboard – Metric-row CSV Version (v4)
+# Fundamental Dashboard – Metric-row CSV Version (v5)
 
 This app is tailored for CSVs like your Nu Holdings files:
 
