@@ -1,5 +1,5 @@
 
-# Fundamental Dashboard – Metric-row CSV Version (v2)
+# Fundamental Dashboard – Metric-row CSV Version (v3)
 
 This app is tailored for CSVs like your Nu Holdings files:
 
@@ -8,12 +8,15 @@ This app is tailored for CSVs like your Nu Holdings files:
 
 It auto-maps metric names to canonical fields, builds a time series by period, and computes:
 
-- Overview
-- Growth
-- Profitability (margins, ROA, ROE)
-- Risk (leverage, interest coverage)
-- Valuation (multiples, EV/EBIT)
-- Simple DCF
+- Overview (with extra line + bar charts)
+- Growth (growth bars + level lines)
+- Profitability (margins, ROA/ROE, margin bars)
+- Risk (leverage lines + capital structure bars, interest coverage)
+- Valuation (multiples and historical lines)
+- Simple DCF (with projected FCF bar chart)
 - Raw data debug views
 
-This v2 version has more robust handling for Series vs scalar math (safe_div, get_latest, interest coverage).
+This v3 version:
+- Prefers the "Net Income to Common Incl Extra Items" row as net_income instead of the EPS row.
+- Drops TTM from time series (uses 2024, 2023, ... as periods; TTM is ignored for growth/ratios).
+- Adds several additional charts in each category.
