@@ -16,6 +16,7 @@ type Props = {
   leftLabel: string;
   rightLabel: string;
   formatY?: (v: number) => string;
+  /** Fixed pixel height. Omit to fill parent. */
   chartHeight?: number;
 };
 
@@ -25,16 +26,17 @@ export function BarChartCard({
   leftLabel,
   rightLabel,
   formatY,
-  chartHeight = 180,
+  chartHeight,
 }: Props) {
   const { theme } = useTheme();
   const yFmt = formatY ?? ((v: number) => `${v}`);
+  const hasRight = data.some((d) => d.rightValue !== 0) && rightLabel;
 
   const option = {
     backgroundColor: 'transparent',
     animation: false,
     grid: {
-      top: 28,
+      top: hasRight ? 28 : 20,
       right: 10,
       bottom: 28,
       left: 10,
@@ -63,11 +65,7 @@ export function BarChartCard({
         formatter: yFmt,
       },
       splitLine: {
-        lineStyle: {
-          color: theme.divider,
-          type: 'solid' as const,
-          opacity: 0.6,
-        },
+        lineStyle: { color: theme.divider, type: 'solid' as const, opacity: 0.6 },
       },
     },
     tooltip: {
@@ -76,28 +74,30 @@ export function BarChartCard({
       borderColor: theme.divider,
       borderWidth: 1,
       textStyle: { color: theme.textPrimary, fontSize: 11 },
-      formatter: (params: Array<{ marker: string; seriesName: string; value: number }>) =>
+      formatter: (
+        params: Array<{ marker: string; seriesName: string; value: number }>
+      ) =>
         params
+          .filter((p) => p.value !== 0 || !hasRight)
           .map((p) => `${p.marker} ${p.seriesName}: ${yFmt(p.value)}`)
           .join('<br/>'),
     },
-    legend: {
-      top: 2,
-      right: 4,
-      textStyle: { color: theme.textMuted, fontSize: 9 },
-      itemWidth: 10,
-      itemHeight: 6,
-    },
+    legend: hasRight
+      ? {
+          top: 2,
+          right: 4,
+          textStyle: { color: theme.textMuted, fontSize: 9 },
+          itemWidth: 10,
+          itemHeight: 6,
+        }
+      : { show: false },
     series: [
       {
-        name: leftLabel,
+        name: leftLabel || 'Value',
         type: 'bar',
-        data: data.map((d) => d.leftValue),
-        itemStyle: {
-          color: theme.bull,
-          borderRadius: [4, 4, 0, 0],
-        },
-        barMaxWidth: 22,
+        data: data.map((d) => (d.leftValue !== 0 ? d.leftValue : null)),
+        itemStyle: { color: theme.bull, borderRadius: [4, 4, 0, 0] },
+        barMaxWidth: hasRight ? 22 : 32,
         barGap: '20%',
         label: {
           show: true,
@@ -105,27 +105,30 @@ export function BarChartCard({
           color: theme.bull,
           fontSize: 9,
           fontWeight: 600,
-          formatter: (p: { value: number }) => yFmt(p.value),
+          formatter: (p: { value: number | null }) =>
+            p.value != null ? yFmt(p.value) : '',
         },
       },
-      {
-        name: rightLabel,
-        type: 'bar',
-        data: data.map((d) => d.rightValue),
-        itemStyle: {
-          color: theme.bear,
-          borderRadius: [4, 4, 0, 0],
-        },
-        barMaxWidth: 22,
-        label: {
-          show: true,
-          position: 'top',
-          color: theme.bear,
-          fontSize: 9,
-          fontWeight: 600,
-          formatter: (p: { value: number }) => yFmt(p.value),
-        },
-      },
+      ...(hasRight
+        ? [
+            {
+              name: rightLabel,
+              type: 'bar',
+              data: data.map((d) => (d.rightValue !== 0 ? d.rightValue : null)),
+              itemStyle: { color: theme.bear, borderRadius: [4, 4, 0, 0] },
+              barMaxWidth: 22,
+              label: {
+                show: true,
+                position: 'top',
+                color: theme.bear,
+                fontSize: 9,
+                fontWeight: 600,
+                formatter: (p: { value: number | null }) =>
+                  p.value != null ? yFmt(p.value) : '',
+              },
+            },
+          ]
+        : []),
     ],
   };
 
@@ -136,6 +139,7 @@ export function BarChartCard({
         display: 'flex',
         flexDirection: 'column',
         height: '100%',
+        boxSizing: 'border-box',
       }}
     >
       <div
@@ -151,11 +155,33 @@ export function BarChartCard({
       >
         {title}
       </div>
-      <ReactEcharts
-        option={option}
-        style={{ height: `${chartHeight}px`, width: '100%', flex: 1 }}
-        notMerge
-      />
+
+      {data.length === 0 || data.every((d) => d.leftValue === 0 && d.rightValue === 0) ? (
+        <div
+          style={{
+            flex: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: theme.textMuted,
+            fontSize: '13px',
+            opacity: 0.4,
+          }}
+        >
+          No data
+        </div>
+      ) : (
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <ReactEcharts
+            option={option}
+            style={{
+              height: chartHeight != null ? `${chartHeight}px` : '100%',
+              width: '100%',
+            }}
+            notMerge
+          />
+        </div>
+      )}
     </CardShell>
   );
 }

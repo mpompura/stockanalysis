@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { ThemeProvider } from '@/contexts/ThemeContext';
+import { DashboardProvider } from '@/contexts/DashboardContext';
 
 export const metadata: Metadata = {
   title: 'IG Finance Post Builder',
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider>
+          <DashboardProvider>{children}</DashboardProvider>
+        </ThemeProvider>
       </body>
     </html>
   );
